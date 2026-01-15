@@ -293,6 +293,7 @@ export async function generateCards(code: string, title: string, deckName: strin
     const project = new Project({ useInMemoryFileSystem: true });
     // Normalize newlines to \n for consistency
     const cleanCode = code.replace(/\r\n/g, '\n'); 
+    const lines = cleanCode.split('\n');
     const sourceFile = project.createSourceFile("input.ts", cleanCode);
 
     // 2. Identify Cloze Ranges (Full File)
@@ -365,9 +366,18 @@ export async function generateCards(code: string, title: string, deckName: strin
         theme: 'dark-plus'
     });
 
-    // 4. Split
-    const chunks = smartSplit(cleanCode);
-    console.log(`Split into ${chunks.length} chunks based on effective lines.`);
+    // 4. Batch Clozes (Chunk by Cloze Count)
+    const MAX_CLOZES_PER_NOTE = 50;
+    // Sort ranges by start position
+    rangesToReplace.sort((a, b) => a.start - b.start);
+    
+    // Split into batches
+    const batches = [];
+    for (let i = 0; i < rangesToReplace.length; i += MAX_CLOZES_PER_NOTE) {
+        batches.push(rangesToReplace.slice(i, i + MAX_CLOZES_PER_NOTE));
+    }
+    
+    console.log(`Found ${rangesToReplace.length} clozes. Split into ${batches.length} notes (Max ${MAX_CLOZES_PER_NOTE} per note).`);
 
     // 5. Connect Anki
     const version = await invokeAnki("version");
@@ -378,40 +388,36 @@ export async function generateCards(code: string, title: string, deckName: strin
 
     let addedCount = 0;
     
-    // 6. Process Chunks
+    // 6. Process Batches
+    // Each batch creates ONE Note containing the FULL Code, but only a subset of clozes active.
     
-    for (const chunk of chunks) {
-        // Prepare data for this chunk
-        const chunkStartLine = chunk.start; // 0-indexed inclusive
-        const chunkEndLine = chunk.end;     // 0-indexed exclusive
+    for (let bIndex = 0; bIndex < batches.length; bIndex++) {
+        const currentBatch = batches[bIndex];
+        // Create a Set of IDs or Start positions for fast lookup
+        // Actually we just need to know if a range is in this batch.
+        // We can assign local IDs (1..50) for the current batch.
         
-        // Context: 3 lines before
-        const contextStart = Math.max(0, chunkStartLine - CONTEXT_LINES_COUNT);
-        const contextEnd = chunkStartLine;
+        // Map Range Start -> New Cloze ID (1..50)
+        // Only for ranges in this batch.
+        const activeClozeMap = new Map<number, number>();
+        currentBatch.forEach((r, i) => {
+            activeClozeMap.set(r.start, i + 1);
+        });
         
-        // Sticky Header
+        // We render the FULL FILE for every note.
+        // Single chunk coverage.
+        const chunkStartLine = 0;
+        const chunkEndLine = lines.length;
+        
+        // Sticky Header (Always top of file?)
+        // If we are just rendering full file, sticky header is less relevant unless we scroll?
+        // But the user liked it. Let's keep it if we were splitting. 
+        // With full file, sticky header at top is just the file-level scope?
         const stickyHeader = getStickyHeader(sourceFile, chunkStartLine);
         
-        // Build HTML
         let htmlLines: string[] = [];
         
-        // --- Simplified Token Processing Logic for Chunk ---
-        // 1. Collect all relevant global clozes for this chunk
-        const chunkStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(chunkStartLine, 0);
-        // Be careful with end line.
-        let chunkEndPos;
-        try {
-             chunkEndPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(chunkEndLine, 0);
-        } catch (e) {
-             chunkEndPos = sourceFile.getFullText().length;
-        }
-        
-        const relevantClozes = rangesToReplace.filter(r => r.start >= chunkStartPos && r.end <= sourceFile.getEnd()); // filter roughly
-        // Map global IDs to local 1..N
-        const globalToLocalId = new Map<number, number>();
-        let localId = 1;
-        
-        const renderLine = (lineIndex: number, isContext: boolean) => {
+        const renderLine = (lineIndex: number) => {
              const lineTokens = tokens[lineIndex];
              // get line start pos
              const lineStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(lineIndex, 0);
@@ -424,71 +430,78 @@ export async function generateCards(code: string, title: string, deckName: strin
                  const tokenEndPos = currentPos + tokenContent.length;
                  const color = (token as any).color || "#d4d4d4";
                  
-                 if (isContext) {
-                      lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
+                 // Check intersection with ANY range (active or inactive)
+                 // We need to know if we should render it as `{{cX::...}}` or just text.
+                 
+                 // Optimization: subset of ranges near this line?
+                 // Filter all ranges? might be slow if 2000 ranges.
+                 // But typically < 1000.
+                 
+                 const intersecting = rangesToReplace.filter(r => 
+                    r.start < tokenEndPos && r.end > currentPos
+                 );
+                 
+                 if (intersecting.length === 0) {
+                     lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
                  } else {
-                     // Check intersection
-                     const intersecting = relevantClozes.filter(r => 
-                        r.start < tokenEndPos && r.end > currentPos
-                     );
+                     // Overlap logic
+                     let processed = "";
+                     let relCursor = 0;
                      
-                     if (intersecting.length === 0) {
-                         lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
-                     } else {
-                         // Overlap logic
-                         let processed = "";
-                         let relCursor = 0;
+                     // Relative ranges
+                     const localRanges = intersecting.map(r => {
+                         const start = Math.max(r.start, currentPos) - currentPos;
+                         const end = Math.min(r.end, tokenEndPos) - currentPos;
                          
-                         // Relative ranges
-                         const localRanges = intersecting.map(r => {
-                             const start = Math.max(r.start, currentPos) - currentPos;
-                             const end = Math.min(r.end, tokenEndPos) - currentPos;
-                             
-                             let cId = globalToLocalId.get(r.start);
-                             if (!cId) {
-                                 cId = localId++;
-                                 globalToLocalId.set(r.start, cId);
-                             }
-                             
-                             return { start, end, id: cId };
-                         });
+                         // Check if active in this batch
+                         const activeId = activeClozeMap.get(r.start);
                          
-                         // Sort
-                         localRanges.sort((a,b) => a.start - b.start);
+                         return { start, end, id: activeId }; // id undefined if not active
+                     });
+                     
+                     // Sort
+                     localRanges.sort((a,b) => a.start - b.start);
+                     
+                     for (const lr of localRanges) {
+                         if (lr.start > relCursor) {
+                             processed += escapeHtml(tokenContent.substring(relCursor, lr.start));
+                         }
+                         const seg = tokenContent.substring(lr.start, lr.end);
                          
-                         for (const lr of localRanges) {
-                             if (lr.start > relCursor) {
-                                 processed += escapeHtml(tokenContent.substring(relCursor, lr.start));
-                             }
-                             const seg = tokenContent.substring(lr.start, lr.end);
+                         if (lr.id !== undefined) {
+                             // Active Cloze
                              processed += `{{c${lr.id}::${escapeHtml(seg)}}}`;
-                             relCursor = lr.end;
-                         }
-                         if (relCursor < tokenContent.length) {
-                             processed += escapeHtml(tokenContent.substring(relCursor));
+                         } else {
+                             // Inactive Cloze - just render text (maybe add a subtle style?)
+                             // User didn't ask for style, just plain code.
+                             processed += escapeHtml(seg);
                          }
                          
-                         lineHtml += `<span style="color: ${color}">${processed}</span>`;
+                         relCursor = lr.end;
                      }
+                     if (relCursor < tokenContent.length) {
+                         processed += escapeHtml(tokenContent.substring(relCursor));
+                     }
+                     
+                     lineHtml += `<span style="color: ${color}">${processed}</span>`;
                  }
                  currentPos = tokenEndPos;
              }
              return lineHtml;
         };
 
-        for (let i = contextStart; i < contextEnd; i++) {
-            htmlLines.push(`<div class="context-line" style="user-select: none;">${renderLine(i, true)}</div>`);
-        }
         for (let i = chunkStartLine; i < chunkEndLine; i++) {
-            htmlLines.push(`<div class="code-line">${renderLine(i, false)}</div>`);
+            htmlLines.push(`<div class="code-line">${renderLine(i)}</div>`);
         }
 
-        // Final HTML
+        // Final HTML - Add Batch info to title? "Title (1/3)"
+        const batchTitle = batches.length > 1 ? `${title} (${bIndex + 1}/${batches.length})` : title;
+
         const finalHtml = `
 <div class="code-container">
     <div class="fixed-header">
         <div class="meta-header">
-            ${title ? `<strong>${escapeHtml(title)}</strong> &mdash; ` : ''}
+            ${batchTitle ? `<strong>${escapeHtml(batchTitle)}</strong> &mdash; ` : ''}
             <span>${deckName}</span>
             <span style="float: right; opacity: 0.7;">${tags.join(", ")}</span>
         </div>
