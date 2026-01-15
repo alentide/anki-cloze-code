@@ -258,7 +258,7 @@ function smartSplit(code: string): { start: number, end: number }[] {
     return chunks;
 }
 
-export async function generateCards(code: string, deckName: string, tags: string[]) {
+export async function generateCards(code: string, title: string, deckName: string, tags: string[]) {
     await getHighlighter();
     
     // 1. Parse Full File
@@ -284,30 +284,10 @@ export async function generateCards(code: string, deckName: string, tags: string
              rangesToReplace.push({
                  start: node.getStart(),
                  end: node.getEnd(),
-                 id: clozeIdCounter++ // Global ID counter? Actually per card is better? 
-                 // If we split cards, each card is a separate note.
-                 // So cloze IDs should reset per card (c1, c2...), or just be unique?
-                 // Anki Cloze notes: {{c1::}}, {{c2::}}.
-                 // If we want ONE card with MULTIPLE clozes, key.
-                 // But wait, the user wants "Anki cloze deletion".
-                 // Usually one Note maps to one Card per cN.
-                 // If we have {{c1::A}} and {{c2::B}}, Anki makes 2 cards.
-                 // For code memorization, do we want to hide ALL variables on ONE card?
-                 // Or generate multiple cards for the same code block?
-                 // The previous implementation used `i + 1`, implying increments globally per chunk.
-                 // Actually, if we want the USER to fill in blanks, usually we hide distinct items.
-                 // Let's keep one unique ID per cloze candidate in the chunk.
-                 // BUT, if we have 50 variables, we don't want 50 cards for one 30-line block?
-                 // That's too many.
-                 // Maybe we group them?
-                 // For now, let's stick to unique IDs, so 1 Note = N cards.
-                 // Users can suspend easy ones.
+                 id: clozeIdCounter++ 
              });
         }
     });
-    // We actually need to reset indices per chunk if we want {{c1}}..{{cMAX}} per chunk.
-    // Cloze IDs in Anki are per Note.
-    // So for each chunk (Note), we should restart 1..N.
     
     // 3. Tokenize Full File
     const h = await getHighlighter();
@@ -330,7 +310,6 @@ export async function generateCards(code: string, deckName: string, tags: string
     let addedCount = 0;
     
     // 6. Process Chunks
-    // We need to map tokens to lines. `tokens` is Array<Token[]>, index is line number.
     
     for (const chunk of chunks) {
         // Prepare data for this chunk
@@ -347,80 +326,6 @@ export async function generateCards(code: string, deckName: string, tags: string
         // Build HTML
         let htmlLines: string[] = [];
         
-        // Helper to process a range of lines
-        const processLines = (start: number, end: number, isContext: boolean) => {
-            let chunkClozeCounter = 1;
-            
-            for (let i = start; i < end; i++) {
-                const lineTokens = tokens[i];
-                if (!lineTokens) continue; // Should not happen
-                
-                let lineHtml = "";
-                // We need absolute pos for this line to match clozes
-                // Fast way: sourceFile.getPositionAtLine(i) ? No, getLineStartPos
-                // `cleanCode` lines match `tokens` lines.
-                // We need cumulative length?
-                // `ts-morph` provides `getLineStartPos`.
-                const lineStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(i, 0);
-                let currentPos = lineStartPos;
-                
-                for (const token of lineTokens) {
-                    const tokenLen = token.content.length;
-                    const tokenEndPos = currentPos + tokenLen;
-                    const color = (token as any).color || "#d4d4d4";
-
-                    if (isContext) {
-                        // Context: No clozes, just render
-                         lineHtml += `<span style="color: ${color}">${escapeHtml(token.content)}</span>`;
-                    } else {
-                        // Active Chunk: Check clozes
-                        // Filter clozes that overlap this token
-                        // AND reset IDs relative to this chunk?
-                        // YES. We need to find *globally* overlapping clozes, but assign them *local* IDs.
-                        // Wait, if we iterate tokens linearly, we encounter clozes.
-                        // We need a mapping of globalCloze -> localClozeId for this chunk?
-                        // Or just assign new IDs on the fly?
-                        // On the fly is fine, as long as the order is deterministic.
-                        
-                        const intersecting = rangesToReplace.filter(r => 
-                            Math.max(r.start, currentPos) < Math.min(r.end, tokenEndPos)
-                        );
-                        
-                        if (intersecting.length > 0) {
-                            // Render with clozes
-                             let processedToken = "";
-                             let lastSliceEnd = 0; // relative to token start
-                             
-                             // We need to sort intersections? They should be sorted.
-                             
-                             // Problem: `intersecting` contains global ranges.
-                             // We don't have local IDs yet.
-                             // We should probably map global ranges to local IDs *before* processing tokens for this chunk
-                             // to ensure consistency? 
-                             // Actually, since we process line by line, token by token, we can just increment counter?
-                             // BUT, a cloze might span tokens? (unlikely for Identifier/Literal).
-                             // If it spans tokens, we'd assign different IDs?
-                             // Valid Identifier/Literal shouldn't span tokens in Shiki usually.
-                             // EXCEPT String literals.
-                             // If a string literal spans tokens, we want SAME ID.
-                             // So we should map globalRange -> ID for this chunk.
-                             
-                        } else {
-                            lineHtml += `<span style="color: ${color}">${escapeHtml(token.content)}</span>`;
-                        }
-                    }
-                    currentPos += tokenLen;
-                }
-                
-                // For context lines, wrap in class
-                if (isContext) {
-                    htmlLines.push(`<div class="context-line">${lineHtml}</div>`);
-                } else {
-                    htmlLines.push(`<div>${lineHtml}</div>`); // clean div for correct block formatting
-                }
-            }
-        };
-
         // --- Simplified Token Processing Logic for Chunk ---
         // 1. Collect all relevant global clozes for this chunk
         const chunkStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(chunkStartLine, 0);
@@ -431,24 +336,15 @@ export async function generateCards(code: string, deckName: string, tags: string
         } catch (e) {
              chunkEndPos = sourceFile.getFullText().length;
         }
-        // actually `transformLineAndColumnToPos` for `chunkEndLine + 1` might be out of bounds if EOF.
-        // It's safer to use `text.length` if last line.
         
         const relevantClozes = rangesToReplace.filter(r => r.start >= chunkStartPos && r.end <= sourceFile.getEnd()); // filter roughly
         // Map global IDs to local 1..N
         const globalToLocalId = new Map<number, number>();
         let localId = 1;
         
-        // We need to iterate tokens to know which are *actually* clozed in this chunk range?
-        // Or just iterate relevantClozes and assign?
-        // Let's assign IDs to ALL clozes, but only use the ones in range.
-        
-        // Just process tokens.
-        
         const renderLine = (lineIndex: number, isContext: boolean) => {
              const lineTokens = tokens[lineIndex];
              // get line start pos
-             // Note: accessing lineStartPos for every line is okay.
              const lineStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(lineIndex, 0);
              let currentPos = lineStartPos;
              
@@ -478,11 +374,6 @@ export async function generateCards(code: string, deckName: string, tags: string
                          const localRanges = intersecting.map(r => {
                              const start = Math.max(r.start, currentPos) - currentPos;
                              const end = Math.min(r.end, tokenEndPos) - currentPos;
-                             
-                             // Get or assign ID
-                             // We use original r.start to identify the unique cloze
-                             // Using a Map<startPos, id>
-                             // But identifiers at same pos? No.
                              
                              let cId = globalToLocalId.get(r.start);
                              if (!cId) {
@@ -527,8 +418,9 @@ export async function generateCards(code: string, deckName: string, tags: string
         const finalHtml = `
 <div class="code-container">
     <div class="meta-header">
+        ${title ? `<strong>${escapeHtml(title)}</strong> &mdash; ` : ''}
         <span>${deckName}</span>
-        <span>${tags.join(", ")}</span>
+        <span style="float: right; opacity: 0.7;">${tags.join(", ")}</span>
     </div>
     ${stickyHeader ? `<div class="sticky-header">${escapeHtml(stickyHeader)}</div>` : ''}
     <pre>${htmlLines.join('\n')}</pre>

@@ -11,7 +11,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
 app.post("/generate", async (req, res) => {
-    const { code, deck, tags } = req.body;
+    const { code, title, deck, tags } = req.body;
     
     if (!code) {
         res.status(400).json({ error: "Code is required" });
@@ -22,7 +22,7 @@ app.post("/generate", async (req, res) => {
     const tagList = Array.isArray(tags) ? tags : (tags || "anki-cloze-code").split(",").map((t: string) => t.trim());
 
     try {
-        const result = await generateCards(code, deckName, tagList);
+        const result = await generateCards(code, title || "", deckName, tagList);
         res.json(result);
     } catch (error: any) {
         console.error(error);

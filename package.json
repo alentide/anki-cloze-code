@@ -6,8 +6,6 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "serve": "tsx src/server.ts",
-    "serve:bg": "nohup tsx src/server.ts > server.log 2>&1 & echo 'Server started in background (port 4000). Logs in server.log'",
-    "stop": "pkill -f \"tsx src/server.ts\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
