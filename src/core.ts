@@ -60,9 +60,7 @@ const MODEL_CSS = `
  font-size: 20px;
  text-align: center;
  color: black;
- background-color: #1e1e1e; /* Match code bg */
- /* Add padding top so content isn't hidden by fixed header */
- padding-top: 80px; 
+ background-color: #1e1e1e;
 }
 
 .cloze {
@@ -83,24 +81,22 @@ const MODEL_CSS = `
 .code-container {
     background-color: #1e1e1e;
     color: #d4d4d4;
-    padding: 10px;
+    padding: 0; /* Container padding handled by header/pre */
     font-family: Consolas, 'Courier New', monospace;
     font-size: 14px;
     line-height: 1.5;
     text-align: left;
-    /* overflow-x: auto; handled by pre usually, but let's allow it */
 }
 
 .fixed-header {
-    position: fixed;
+    position: sticky; /* Sticky is better for iOS than fixed */
     top: 0;
-    left: 0;
-    right: 0;
     background-color: #1e1e1e;
     z-index: 1000;
     padding: 10px 20px;
     border-bottom: 1px solid #333;
     box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    margin-bottom: 10px;
 }
 
 .sticky-header {
@@ -130,6 +126,7 @@ const MODEL_CSS = `
 
 pre {
  margin: 0;
+ padding: 0 10px 20px 10px; /* Add bottom padding */
  white-space: pre-wrap;
 }
 `;
@@ -285,28 +282,8 @@ function getStickyHeader(sourceFile: SourceFile, line: number): string | null {
 
 function smartSplit(code: string): { start: number, end: number }[] {
     const lines = code.split('\n');
-    const chunks: { start: number, end: number }[] = [];
-    
-    let currentStart = 0;
-    let effectiveCount = 0;
-    
-    for (let i = 0; i < lines.length; i++) {
-        if (isEffectiveLine(lines[i])) {
-            effectiveCount++;
-        }
-        
-        if (effectiveCount >= TARGET_EFFECTIVE_LINES) {
-            chunks.push({ start: currentStart, end: i + 1 });
-            currentStart = i + 1;
-            effectiveCount = 0;
-        }
-    }
-    
-    if (currentStart < lines.length) {
-        chunks.push({ start: currentStart, end: lines.length });
-    }
-    
-    return chunks;
+    // DISABLED SPLITTING: Return single chunk covering all lines
+    return [{ start: 0, end: lines.length }];
 }
 
 export async function generateCards(code: string, title: string, deckName: string, tags: string[]) {
