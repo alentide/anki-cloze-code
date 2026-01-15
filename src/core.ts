@@ -299,7 +299,19 @@ export async function generateCards(code: string, title: string, deckName: strin
     const rangesToReplace: { start: number; end: number; id: number }[] = [];
     let clozeIdCounter = 1;
 
+    const CRITICAL_OPERATORS = new Set([
+        // Logic
+        "&&", "||", "??", "!",
+        // Comparison
+        ">", "<", ">=", "<=", "===", "!==", "==", "!=",
+        // Assessment / Mutation
+        "+=", "-=", "*=", "/=", "%=",
+        // Math (Critical)
+        "%" 
+    ]);
+
     sourceFile.forEachDescendant((node) => {
+        // 1. Existing: Identifiers & Literals
         if (
             Node.isIdentifier(node) ||
             Node.isStringLiteral(node) ||
@@ -308,12 +320,41 @@ export async function generateCards(code: string, title: string, deckName: strin
             node.getKind() === SyntaxKind.FalseKeyword
         ) {
              if (node.getAncestors().some(a => Node.isImportDeclaration(a))) return;
+             // Avoid property access names? e.g. console.log -> log?
+             // User didn't complain yet.
              
              rangesToReplace.push({
                  start: node.getStart(),
                  end: node.getEnd(),
                  id: clozeIdCounter++ 
              });
+        }
+        
+        // 2. Critical Operators (Binary: &&, ||, +=, >, %)
+        if (Node.isBinaryExpression(node)) {
+            const opToken = node.getOperatorToken();
+            const opText = opToken.getText();
+            if (CRITICAL_OPERATORS.has(opText)) {
+                rangesToReplace.push({
+                    start: opToken.getStart(),
+                    end: opToken.getEnd(),
+                    id: clozeIdCounter++ 
+                });
+            }
+        }
+
+        // 3. Unary Operators (Only !)
+        if (Node.isPrefixUnaryExpression(node)) {
+            // operator token is SyntaxKind.ExclamationToken
+            if (node.getOperatorToken() === SyntaxKind.ExclamationToken) {
+                 // Wait, getOperatorToken() returns the kind number for PrefixUnary?
+                 // checking ts-morph docs: getOperatorToken() returns the kind (number).
+                 rangesToReplace.push({
+                     start: node.getStart(), // ! is at the start usually
+                     end: node.getStart() + 1,
+                     id: clozeIdCounter++ 
+                 });
+            }
         }
     });
     
