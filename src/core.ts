@@ -75,10 +75,16 @@ async function ensureModel(modelName: string) {
 
 .cloze {
  font-weight: bold;
- color: blue;
+ color: #FFD700; /* Gold pops better than white */
+ background-color: rgba(255, 255, 255, 0.1); /* Subtle background box */
+ border-bottom: 2px solid #FFD700; /* Underline */
+ padding: 0 4px;
+ border-radius: 4px;
 }
 .nightMode .cloze {
- color: lightblue;
+ color: #FFD700;
+ background-color: rgba(255, 255, 255, 0.1);
+ border-bottom: 2px solid #FFD700;
 }
 `,
         isCloze: true,
