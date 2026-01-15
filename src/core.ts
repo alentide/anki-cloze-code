@@ -1,10 +1,11 @@
-import { Project, SyntaxKind, Node } from "ts-morph";
+import { Project, SyntaxKind, Node, SourceFile } from "ts-morph";
 import axios from "axios";
-import { createHighlighter, Highlighter, BundledTheme, BundledLanguage } from "shiki";
+import { createHighlighter, Highlighter } from "shiki";
 
 // 1. Configuration
 const ANKI_CONNECT_URL = "http://127.0.0.1:8765";
-const MAX_LINES_PER_CARD = 30;
+const TARGET_EFFECTIVE_LINES = 30;
+const CONTEXT_LINES_COUNT = 3;
 
 // 2. Anki Connect Helper
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -53,18 +54,7 @@ async function addToAnki(content: string, modelName: string, deckName: string, t
     }
 }
 
-async function ensureModel(modelName: string) {
-    const models = await invokeAnki("modelNames");
-    if (models && models.includes(modelName)) {
-        console.log(`Model '${modelName}' exists.`);
-        return;
-    }
-
-    console.log(`Model '${modelName}' not found. Creating...`);
-    const result = await invokeAnki("createModel", {
-        modelName: modelName,
-        inOrderFields: ["Text"],
-        css: `
+const MODEL_CSS = `
 .card {
  font-family: arial;
  font-size: 20px;
@@ -75,9 +65,9 @@ async function ensureModel(modelName: string) {
 
 .cloze {
  font-weight: bold;
- color: #FFD700; /* Gold pops better than white */
- background-color: rgba(255, 255, 255, 0.1); /* Subtle background box */
- border-bottom: 2px solid #FFD700; /* Underline */
+ color: #FFD700;
+ background-color: rgba(255, 255, 255, 0.1);
+ border-bottom: 2px solid #FFD700;
  padding: 0 4px;
  border-radius: 4px;
 }
@@ -86,7 +76,71 @@ async function ensureModel(modelName: string) {
  background-color: rgba(255, 255, 255, 0.1);
  border-bottom: 2px solid #FFD700;
 }
-`,
+
+/* Custom Structure */
+.code-container {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 10px;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    border-radius: 5px;
+    text-align: left;
+    overflow-x: auto;
+}
+
+.sticky-header {
+    background-color: #2d2d2d;
+    color: #9cdcfe;
+    padding: 5px 10px;
+    border-left: 3px solid #0e639c;
+    margin-bottom: 10px;
+    font-size: 12px;
+    white-space: pre;
+    border-radius: 3px;
+}
+
+.meta-header {
+    display: flex;
+    justify-content: space-between;
+    color: #888;
+    font-size: 11px;
+    margin-bottom: 5px;
+    border-bottom: 1px solid #333;
+    padding-bottom: 2px;
+}
+
+.context-line {
+    opacity: 0.5;
+    background-color: #252526;
+}
+
+pre {
+ margin: 0;
+ white-space: pre-wrap;
+}
+`;
+
+async function ensureModel(modelName: string) {
+    const models = await invokeAnki("modelNames");
+    if (models && models.includes(modelName)) {
+        console.log(`Model '${modelName}' exists. Updating styling...`);
+        // Always force update CSS to ensure latest changes are applied
+        await invokeAnki("updateModelStyling", {
+            model: {
+                name: modelName,
+                css: MODEL_CSS
+            }
+        });
+        return;
+    }
+
+    console.log(`Model '${modelName}' not found. Creating...`);
+    const result = await invokeAnki("createModel", {
+        modelName: modelName,
+        inOrderFields: ["Text"],
+        css: MODEL_CSS,
         isCloze: true,
         cardTemplates: [
             {
@@ -104,13 +158,13 @@ async function ensureModel(modelName: string) {
     }
 }
 
-// 3. Core Logic: Process Code
+// 3. Core Logic
 let highlighter: Highlighter | null = null;
 
 async function getHighlighter() {
     if (!highlighter) {
         highlighter = await createHighlighter({
-            themes: ['dark-plus', 'vitesse-dark'],
+            themes: ['dark-plus'],
             langs: ['typescript', 'ts'],
         });
     }
@@ -126,13 +180,97 @@ function escapeHtml(unsafe: string) {
         .replace(/'/g, "&#039;");
 }
 
-async function processChunk(code: string, index: number, modelName: string, deckName: string, tags: string[]) {
-    const project = new Project({ useInMemoryFileSystem: true });
-    // ts-morph source file
-    const sourceFile = project.createSourceFile(`chunk_${index}.ts`, code);
+function isEffectiveLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return false;
+    // Helper lines like "}," "];" or simple comments, or just syntax chars
+    if (/^[\}\]\)\;]+$/.test(trimmed)) return false; 
+    return true;
+}
 
-    // 1. Identify ranges from AST
-    const rangesToReplace: { start: number; end: number; text: string }[] = [];
+function getStickyHeader(sourceFile: SourceFile, line: number): string | null {
+    // line is 0-indexed in our logic, but ts-morph uses mostly parsed structure
+    // Let's get position
+    try {
+        const lines = sourceFile.getFullText().split('\n');
+        // Simple check: if we are out of bounds
+        if (line >= lines.length) return null;
+        
+        const pos = sourceFile.compilerNode.getPositionOfLineAndCharacter(line, 0);
+        
+        let node = sourceFile.getDescendantAtPos(pos);
+        if (!node) return null;
+
+        // Find ancestors that are "Scopes"
+        const ancestors = node.getAncestors();
+        const scopes = ancestors.filter(a => 
+            Node.isClassDeclaration(a) || 
+            Node.isFunctionDeclaration(a) || 
+            Node.isMethodDeclaration(a) ||
+            Node.isInterfaceDeclaration(a)
+        );
+
+        if (scopes.length === 0) return null;
+
+        // Take the closest 2 scopes? or just the closest?
+        // Let's take the closest one
+        const closest = scopes[0]; // Ancestors are usually bottom-up in ts-morph? No, getAncestors returns closest first? 
+        // Actually getAncestors usually returns root first? Let's check doc/behavior.
+        // Actually typically it is bottom-up (closest parent first).
+        
+        // Let's construct a breadcrumb: Class > Method
+        // Reversing to get Top > Down
+        const breadcrumbs = scopes.reverse().map(s => {
+             let text = s.getText().split('\n')[0];
+             if (text.length > 60) text = text.substring(0, 57) + "...";
+             return text;
+        });
+
+        return breadcrumbs.join(" > ");
+    } catch (e) {
+        return null;
+    }
+}
+
+function smartSplit(code: string): { start: number, end: number }[] {
+    const lines = code.split('\n');
+    const chunks: { start: number, end: number }[] = [];
+    
+    let currentStart = 0;
+    let effectiveCount = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+        if (isEffectiveLine(lines[i])) {
+            effectiveCount++;
+        }
+        
+        if (effectiveCount >= TARGET_EFFECTIVE_LINES) {
+            chunks.push({ start: currentStart, end: i + 1 });
+            currentStart = i + 1;
+            effectiveCount = 0;
+        }
+    }
+    
+    if (currentStart < lines.length) {
+        chunks.push({ start: currentStart, end: lines.length });
+    }
+    
+    return chunks;
+}
+
+export async function generateCards(code: string, deckName: string, tags: string[]) {
+    await getHighlighter();
+    
+    // 1. Parse Full File
+    const project = new Project({ useInMemoryFileSystem: true });
+    // Normalize newlines to \n for consistency
+    const cleanCode = code.replace(/\r\n/g, '\n'); 
+    const sourceFile = project.createSourceFile("input.ts", cleanCode);
+
+    // 2. Identify Cloze Ranges (Full File)
+    const rangesToReplace: { start: number; end: number; id: number }[] = [];
+    let clozeIdCounter = 1;
+
     sourceFile.forEachDescendant((node) => {
         if (
             Node.isIdentifier(node) ||
@@ -146,142 +284,260 @@ async function processChunk(code: string, index: number, modelName: string, deck
              rangesToReplace.push({
                  start: node.getStart(),
                  end: node.getEnd(),
-                 text: node.getText()
+                 id: clozeIdCounter++ // Global ID counter? Actually per card is better? 
+                 // If we split cards, each card is a separate note.
+                 // So cloze IDs should reset per card (c1, c2...), or just be unique?
+                 // Anki Cloze notes: {{c1::}}, {{c2::}}.
+                 // If we want ONE card with MULTIPLE clozes, key.
+                 // But wait, the user wants "Anki cloze deletion".
+                 // Usually one Note maps to one Card per cN.
+                 // If we have {{c1::A}} and {{c2::B}}, Anki makes 2 cards.
+                 // For code memorization, do we want to hide ALL variables on ONE card?
+                 // Or generate multiple cards for the same code block?
+                 // The previous implementation used `i + 1`, implying increments globally per chunk.
+                 // Actually, if we want the USER to fill in blanks, usually we hide distinct items.
+                 // Let's keep one unique ID per cloze candidate in the chunk.
+                 // BUT, if we have 50 variables, we don't want 50 cards for one 30-line block?
+                 // That's too many.
+                 // Maybe we group them?
+                 // For now, let's stick to unique IDs, so 1 Note = N cards.
+                 // Users can suspend easy ones.
              });
         }
     });
-
-    rangesToReplace.sort((a, b) => a.start - b.start);
-    const replacementsWithIds = rangesToReplace.map((r, i) => ({ ...r, id: i + 1 }));
-
-    // 2. Tokenize with Shiki
+    // We actually need to reset indices per chunk if we want {{c1}}..{{cMAX}} per chunk.
+    // Cloze IDs in Anki are per Note.
+    // So for each chunk (Note), we should restart 1..N.
+    
+    // 3. Tokenize Full File
     const h = await getHighlighter();
-    const { tokens } = h.codeToTokens(code, {
+    const { tokens } = h.codeToTokens(cleanCode, {
         lang: 'ts',
-        theme: 'dark-plus' // Close to VSCode Dark
+        theme: 'dark-plus'
     });
 
-    // 3. Merge Tokens and Ranges
-    let htmlLines: string[] = [];
-    let absIndex = 0;
+    // 4. Split
+    const chunks = smartSplit(cleanCode);
+    console.log(`Split into ${chunks.length} chunks based on effective lines.`);
 
-    for (const lineTokens of tokens) {
-        let lineHtml = "";
-        
-        for (const token of lineTokens) {
-            const tokenStart = absIndex;
-            const tokenEnd = absIndex + token.content.length;
-            const tokenContent = token.content;
-            const color = (token as any).color || "#d4d4d4"; // Force cast to any or check type
-
-            const intersecting = replacementsWithIds.filter(r => 
-                Math.max(r.start, tokenStart) < Math.min(r.end, tokenEnd)
-            );
-
-            if (intersecting.length > 0) {
-                let processedToken = "";
-                let lastSliceEnd = 0; // relative to token content (0 to length)
-                
-                // Find relevant parts relative to this token
-                const chunksInToken: {startRel: number, endRel: number, id: number}[] = [];
-                
-                for (const r of intersecting) {
-                    const overlapStart = Math.max(r.start, tokenStart);
-                    const overlapEnd = Math.min(r.end, tokenEnd);
-                    
-                    if (overlapEnd > overlapStart) {
-                        chunksInToken.push({
-                            startRel: overlapStart - tokenStart,
-                            endRel: overlapEnd - tokenStart,
-                            id: r.id
-                        });
-                    }
-                }
-                
-                if (chunksInToken.length === 0) {
-                     processedToken = escapeHtml(tokenContent);
-                } else {
-                    for (const chunk of chunksInToken) {
-                         // Add non-clozed part before
-                         if (chunk.startRel > lastSliceEnd) {
-                             processedToken += escapeHtml(tokenContent.substring(lastSliceEnd, chunk.startRel));
-                         }
-                         const segment = tokenContent.substring(chunk.startRel, chunk.endRel);
-                         processedToken += `{{c${chunk.id}::${escapeHtml(segment)}}}`;
-                         lastSliceEnd = chunk.endRel;
-                    }
-                    if (lastSliceEnd < tokenContent.length) {
-                        processedToken += escapeHtml(tokenContent.substring(lastSliceEnd));
-                    }
-                }
-                lineHtml += `<span style="color: ${color}">${processedToken}</span>`;
-
-            } else {
-                lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
-            }
-            
-            absIndex = tokenEnd;
-        }
-        
-        if (code[absIndex] === '\n') {
-            absIndex++;
-        } else if (code[absIndex] === '\r' && code[absIndex+1] === '\n') {
-            absIndex += 2;
-        }
-        
-        htmlLines.push(lineHtml);
-    }
-
-    const finalHtml = `
-    <div style="background-color: #1e1e1e; color: #d4d4d4; padding: 20px; font-family: Consolas, 'Courier New', monospace; font-size: 14px; line-height: 1.5; border-radius: 5px;">
-        <pre style="margin: 0; white-space: pre-wrap;">${htmlLines.join('\n')}</pre>
-    </div>
-    `;
-
-    console.log(`Generated HTML with Shiki for Chunk ${index}.`);
-    return await addToAnki(finalHtml, modelName, deckName, tags);
-}
-
-export async function generateCards(code: string, deckName: string, tags: string[]) {
-    // Init highlighter early
-    await getHighlighter();
-
-    const lines = code.split("\n");
-    const chunks: string[] = [];
-    let currentChunk: string[] = [];
-
-    for (const line of lines) {
-        currentChunk.push(line);
-        if (currentChunk.length >= MAX_LINES_PER_CARD) {
-            chunks.push(currentChunk.join("\n"));
-            currentChunk = [];
-        }
-    }
-    if (currentChunk.length > 0) {
-        chunks.push(currentChunk.join("\n"));
-    }
-
-    console.log(`Split into ${chunks.length} chunks.`);
-
-    console.log(`Checking connection to AnkiConnect...`);
+    // 5. Connect Anki
     const version = await invokeAnki("version");
-    if (!version) {
-        const msg = "Could not connect to AnkiConnect. Make sure Anki is running and AnkiConnect is installed.";
-        console.error(msg);
-        return { success: false, message: msg };
-    }
-    console.log(`Connected to AnkiConnect v${version}`);
-
+    if (!version) return { success: false, message: "AnkiConnect not found." };
     await invokeAnki("createDeck", { deck: deckName });
-
     const MODEL_NAME = "anki-cloze-code";
     await ensureModel(MODEL_NAME);
 
     let addedCount = 0;
-    for (let i = 0; i < chunks.length; i++) {
-        const res = await processChunk(chunks[i], i, MODEL_NAME, deckName, tags);
+    
+    // 6. Process Chunks
+    // We need to map tokens to lines. `tokens` is Array<Token[]>, index is line number.
+    
+    for (const chunk of chunks) {
+        // Prepare data for this chunk
+        const chunkStartLine = chunk.start; // 0-indexed inclusive
+        const chunkEndLine = chunk.end;     // 0-indexed exclusive
+        
+        // Context: 3 lines before
+        const contextStart = Math.max(0, chunkStartLine - CONTEXT_LINES_COUNT);
+        const contextEnd = chunkStartLine;
+        
+        // Sticky Header
+        const stickyHeader = getStickyHeader(sourceFile, chunkStartLine);
+        
+        // Build HTML
+        let htmlLines: string[] = [];
+        
+        // Helper to process a range of lines
+        const processLines = (start: number, end: number, isContext: boolean) => {
+            let chunkClozeCounter = 1;
+            
+            for (let i = start; i < end; i++) {
+                const lineTokens = tokens[i];
+                if (!lineTokens) continue; // Should not happen
+                
+                let lineHtml = "";
+                // We need absolute pos for this line to match clozes
+                // Fast way: sourceFile.getPositionAtLine(i) ? No, getLineStartPos
+                // `cleanCode` lines match `tokens` lines.
+                // We need cumulative length?
+                // `ts-morph` provides `getLineStartPos`.
+                const lineStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(i, 0);
+                let currentPos = lineStartPos;
+                
+                for (const token of lineTokens) {
+                    const tokenLen = token.content.length;
+                    const tokenEndPos = currentPos + tokenLen;
+                    const color = (token as any).color || "#d4d4d4";
+
+                    if (isContext) {
+                        // Context: No clozes, just render
+                         lineHtml += `<span style="color: ${color}">${escapeHtml(token.content)}</span>`;
+                    } else {
+                        // Active Chunk: Check clozes
+                        // Filter clozes that overlap this token
+                        // AND reset IDs relative to this chunk?
+                        // YES. We need to find *globally* overlapping clozes, but assign them *local* IDs.
+                        // Wait, if we iterate tokens linearly, we encounter clozes.
+                        // We need a mapping of globalCloze -> localClozeId for this chunk?
+                        // Or just assign new IDs on the fly?
+                        // On the fly is fine, as long as the order is deterministic.
+                        
+                        const intersecting = rangesToReplace.filter(r => 
+                            Math.max(r.start, currentPos) < Math.min(r.end, tokenEndPos)
+                        );
+                        
+                        if (intersecting.length > 0) {
+                            // Render with clozes
+                             let processedToken = "";
+                             let lastSliceEnd = 0; // relative to token start
+                             
+                             // We need to sort intersections? They should be sorted.
+                             
+                             // Problem: `intersecting` contains global ranges.
+                             // We don't have local IDs yet.
+                             // We should probably map global ranges to local IDs *before* processing tokens for this chunk
+                             // to ensure consistency? 
+                             // Actually, since we process line by line, token by token, we can just increment counter?
+                             // BUT, a cloze might span tokens? (unlikely for Identifier/Literal).
+                             // If it spans tokens, we'd assign different IDs?
+                             // Valid Identifier/Literal shouldn't span tokens in Shiki usually.
+                             // EXCEPT String literals.
+                             // If a string literal spans tokens, we want SAME ID.
+                             // So we should map globalRange -> ID for this chunk.
+                             
+                        } else {
+                            lineHtml += `<span style="color: ${color}">${escapeHtml(token.content)}</span>`;
+                        }
+                    }
+                    currentPos += tokenLen;
+                }
+                
+                // For context lines, wrap in class
+                if (isContext) {
+                    htmlLines.push(`<div class="context-line">${lineHtml}</div>`);
+                } else {
+                    htmlLines.push(`<div>${lineHtml}</div>`); // clean div for correct block formatting
+                }
+            }
+        };
+
+        // --- Simplified Token Processing Logic for Chunk ---
+        // 1. Collect all relevant global clozes for this chunk
+        const chunkStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(chunkStartLine, 0);
+        // Be careful with end line.
+        let chunkEndPos;
+        try {
+             chunkEndPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(chunkEndLine, 0);
+        } catch (e) {
+             chunkEndPos = sourceFile.getFullText().length;
+        }
+        // actually `transformLineAndColumnToPos` for `chunkEndLine + 1` might be out of bounds if EOF.
+        // It's safer to use `text.length` if last line.
+        
+        const relevantClozes = rangesToReplace.filter(r => r.start >= chunkStartPos && r.end <= sourceFile.getEnd()); // filter roughly
+        // Map global IDs to local 1..N
+        const globalToLocalId = new Map<number, number>();
+        let localId = 1;
+        
+        // We need to iterate tokens to know which are *actually* clozed in this chunk range?
+        // Or just iterate relevantClozes and assign?
+        // Let's assign IDs to ALL clozes, but only use the ones in range.
+        
+        // Just process tokens.
+        
+        const renderLine = (lineIndex: number, isContext: boolean) => {
+             const lineTokens = tokens[lineIndex];
+             // get line start pos
+             // Note: accessing lineStartPos for every line is okay.
+             const lineStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(lineIndex, 0);
+             let currentPos = lineStartPos;
+             
+             let lineHtml = "";
+             
+             for (const token of lineTokens) {
+                 const tokenContent = token.content;
+                 const tokenEndPos = currentPos + tokenContent.length;
+                 const color = (token as any).color || "#d4d4d4";
+                 
+                 if (isContext) {
+                      lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
+                 } else {
+                     // Check intersection
+                     const intersecting = relevantClozes.filter(r => 
+                        r.start < tokenEndPos && r.end > currentPos
+                     );
+                     
+                     if (intersecting.length === 0) {
+                         lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
+                     } else {
+                         // Overlap logic
+                         let processed = "";
+                         let relCursor = 0;
+                         
+                         // Relative ranges
+                         const localRanges = intersecting.map(r => {
+                             const start = Math.max(r.start, currentPos) - currentPos;
+                             const end = Math.min(r.end, tokenEndPos) - currentPos;
+                             
+                             // Get or assign ID
+                             // We use original r.start to identify the unique cloze
+                             // Using a Map<startPos, id>
+                             // But identifiers at same pos? No.
+                             
+                             let cId = globalToLocalId.get(r.start);
+                             if (!cId) {
+                                 cId = localId++;
+                                 globalToLocalId.set(r.start, cId);
+                             }
+                             
+                             return { start, end, id: cId };
+                         });
+                         
+                         // Sort
+                         localRanges.sort((a,b) => a.start - b.start);
+                         
+                         for (const lr of localRanges) {
+                             if (lr.start > relCursor) {
+                                 processed += escapeHtml(tokenContent.substring(relCursor, lr.start));
+                             }
+                             const seg = tokenContent.substring(lr.start, lr.end);
+                             processed += `{{c${lr.id}::${escapeHtml(seg)}}}`;
+                             relCursor = lr.end;
+                         }
+                         if (relCursor < tokenContent.length) {
+                             processed += escapeHtml(tokenContent.substring(relCursor));
+                         }
+                         
+                         lineHtml += `<span style="color: ${color}">${processed}</span>`;
+                     }
+                 }
+                 currentPos = tokenEndPos;
+             }
+             return lineHtml;
+        };
+
+        for (let i = contextStart; i < contextEnd; i++) {
+            htmlLines.push(`<div class="context-line" style="user-select: none;">${renderLine(i, true)}</div>`);
+        }
+        for (let i = chunkStartLine; i < chunkEndLine; i++) {
+            htmlLines.push(`<div class="code-line">${renderLine(i, false)}</div>`);
+        }
+
+        // Final HTML
+        const finalHtml = `
+<div class="code-container">
+    <div class="meta-header">
+        <span>${deckName}</span>
+        <span>${tags.join(", ")}</span>
+    </div>
+    ${stickyHeader ? `<div class="sticky-header">${escapeHtml(stickyHeader)}</div>` : ''}
+    <pre>${htmlLines.join('\n')}</pre>
+</div>
+`;
+        const res = await addToAnki(finalHtml, MODEL_NAME, deckName, tags);
         if (res) addedCount++;
     }
-    
+
     return { success: true, addedCount };
 }
+
