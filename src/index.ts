@@ -3,6 +3,7 @@ import { Project, SyntaxKind, Node } from "ts-morph";
 import axios from "axios";
 import * as fs from "fs";
 import * as path from "path";
+import { createHighlighter, Highlighter, BundledTheme, BundledLanguage } from "shiki";
 
 // 1. Configuration
 const ANKI_CONNECT_URL = "http://127.0.0.1:8765";
@@ -14,14 +15,14 @@ const MAX_LINES_PER_CARD = 30;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function invokeAnki(action: string, params: any = {}) {
-    await sleep(200); // Small delay to prevent overwhelming AnkiConnect
+    await sleep(200);
     try {
         const response = await axios.post(ANKI_CONNECT_URL, {
             action,
             version: 6,
             params,
         }, {
-            headers: { 'Connection': 'close' } // Force close connection
+             headers: { 'Connection': 'close' }
         });
         if (response.data.error) {
             console.error(`AnkiConnect Error [${action}]:`, response.data.error);
@@ -35,23 +36,33 @@ async function invokeAnki(action: string, params: any = {}) {
 }
 
 // 3. Core Logic: Process Code
+let highlighter: Highlighter | null = null;
+
+async function getHighlighter() {
+    if (!highlighter) {
+        highlighter = await createHighlighter({
+            themes: ['dark-plus', 'vitesse-dark'],
+            langs: ['typescript', 'ts'],
+        });
+    }
+    return highlighter;
+}
+
 async function processCode() {
+    // Init highlighter early
+    await getHighlighter();
+
     const project = new Project();
-    const sourceFile = project.addSourceFileAtPath(INPUT_FILE); // Load input.ts
+    const sourceFile = project.addSourceFileAtPath(INPUT_FILE);
     const fullText = sourceFile.getFullText();
     const totalLines = sourceFile.getEndLineNumber();
 
     console.log(`Processing ${INPUT_FILE} (${totalLines} lines)...`);
 
-    // Split into chunks if necessary (Naive line splitting for now, improved later)
-    // For now, let's treat the whole file as one chunk or split strictly by lines.
-    // Given the requirement "control around 30 lines", we'll chunk by lines.
-
     const lines = fullText.split("\n");
     const chunks: string[] = [];
     let currentChunk: string[] = [];
 
-    // Simple chunking logic
     for (const line of lines) {
         currentChunk.push(line);
         if (currentChunk.length >= MAX_LINES_PER_CARD) {
@@ -76,37 +87,70 @@ async function processCode() {
     await invokeAnki("createDeck", { deck: DECK_NAME });
 
     // Fetch models to find Cloze
-    const models = await invokeAnki("modelNames");
-    let clozeModel = "Cloze";
-    if (Array.isArray(models)) {
-        const found = models.find((m: string) => m.toLowerCase().includes("cloze") || m.includes("填空"));
-        if (found) {
-            clozeModel = found;
-            console.log(`Using model: ${clozeModel}`);
-        } else {
-            console.warn(`Could not find a Cloze model in ${models}. Defaulting to 'Cloze'.`);
-        }
-    } else {
-        console.warn("Failed to fetch model names.");
-    }
+    await invokeAnki("createDeck", { deck: DECK_NAME });
+
+    // Ensure model exists
+    const MODEL_NAME = "anki-cloze-code";
+    await ensureModel(MODEL_NAME);
 
     for (let i = 0; i < chunks.length; i++) {
-        await processChunk(chunks[i], i, clozeModel);
+        await processChunk(chunks[i], i, MODEL_NAME);
+    }
+}
+
+async function ensureModel(modelName: string) {
+    const models = await invokeAnki("modelNames");
+    if (models.includes(modelName)) {
+        console.log(`Model '${modelName}' exists.`);
+        return;
+    }
+
+    console.log(`Model '${modelName}' not found. Creating...`);
+    const result = await invokeAnki("createModel", {
+        modelName: modelName,
+        inOrderFields: ["Text"],
+        css: `
+.card {
+ font-family: arial;
+ font-size: 20px;
+ text-align: center;
+ color: black;
+ background-color: white;
+}
+
+.cloze {
+ font-weight: bold;
+ color: blue;
+}
+.nightMode .cloze {
+ color: lightblue;
+}
+`,
+        isCloze: true,
+        cardTemplates: [
+            {
+                Name: "Cloze",
+                Front: "{{cloze:Text}}",
+                Back: "{{cloze:Text}}"
+            }
+        ]
+    });
+    
+    if (result && result.error) {
+        console.error("Failed to create model:", result.error);
+    } else {
+        console.log(`Model '${modelName}' created successfully.`);
     }
 }
 
 async function processChunk(code: string, index: number, modelName: string) {
     const project = new Project({ useInMemoryFileSystem: true });
+    // ts-morph source file
     const sourceFile = project.createSourceFile(`chunk_${index}.ts`, code);
 
-    // Identify nodes to replace
-    // We want to replace: Variables, Function Names, Literals (Strings, Numbers)
-    // We will collect ranges to replace.
-
+    // 1. Identify ranges from AST
     const rangesToReplace: { start: number; end: number; text: string }[] = [];
-
     sourceFile.forEachDescendant((node) => {
-        // Skip keywords, punctuation, whitespace
         if (
             Node.isIdentifier(node) ||
             Node.isStringLiteral(node) ||
@@ -114,10 +158,7 @@ async function processChunk(code: string, index: number, modelName: string) {
             node.getKind() === SyntaxKind.TrueKeyword || 
             node.getKind() === SyntaxKind.FalseKeyword
         ) {
-            // Logic to avoid overlapping ranges? 
-            // `forEachDescendant` does deep traversal. Valid check might be needed.
-            // But identifiers and literals are usually leaf nodes.
-             if (node.getAncestors().some(a => Node.isImportDeclaration(a))) return; // Skip imports for now? Maybe user wants to learn them. Let's keep them.
+             if (node.getAncestors().some(a => Node.isImportDeclaration(a))) return;
              
              rangesToReplace.push({
                  start: node.getStart(),
@@ -127,65 +168,147 @@ async function processChunk(code: string, index: number, modelName: string) {
         }
     });
 
-    // Sort ranges reverse so we can replace without affecting indices
-    rangesToReplace.sort((a, b) => b.start - a.start);
-
-    // Deduplicate or check for overlaps if any (Leaf nodes shouldn't overlap)
-
-    // Generate text with clozes
-    // Strategy: We want multiple cards from this one massive code block?
-    // "Automatically make massive cloze cards"
-    // Option A: One card with {{c1::var1}}, {{c2::var2}} -> Generates N cards.
-    // Option B: Group them?
-    // Let's go with Option A: Each identifier is a separate cloze c1, c2, c3...
-    
-    let processedCode = code;
-    // We need to rebuild the string because simple replacement changes indices.
-    // Actually, simple string slicing works if we iterate reverse.
-    
-    let clozeIndex = 1;
-    // We need to map which range gets which 'cN'.
-    // If we use one big card with {{c1}}...{{c50}}, Anki makes 50 cards.
-    // However, Anki Cloze has a limit on fields, but here we are putting it in 'Text' field.
-    // Anki handles many clozes fine.
-
-    // BUT, iterating reverse means the first item in array is the LAST in text.
-    // So if we have 50 items, the last one in text gets c1? 
-    // Usually people read top to bottom.
-    // Let's re-sort to normal order to assign IDs, then apply replacements in reverse.
-
     rangesToReplace.sort((a, b) => a.start - b.start);
+    const replacementsWithIds = rangesToReplace.map((r, i) => ({ ...r, id: i + 1 }));
+
+    // 2. Tokenize with Shiki
+    const h = await getHighlighter();
+    const { tokens } = h.codeToTokens(code, {
+        lang: 'ts',
+        theme: 'dark-plus' // Close to VSCode Dark
+    });
+
+    // 3. Merge Tokens and Ranges
+    // We want to reconstruct HTML line by line.
     
-    // Assign IDs
-    const replacementsWithIds = rangesToReplace.map((r, i) => ({
-        ...r,
-        id: i + 1
-    }));
+    let htmlLines: string[] = [];
+    let currentPos = 0; // Position in entire string (assuming codeToTokens preserves input structure perfectly, which it usually does)
+    
+    // We need to track current char position across lines in the original code.
+    // WARNING: `tokens` is Array<Token[]>, one array per line.
+    // We need to match this to "text absolute index".
+    
+    let absIndex = 0;
 
-    // Apply Reverse
-    replacementsWithIds.sort((a, b) => b.start - a.start);
+    for (const lineTokens of tokens) {
+        let lineHtml = "";
+        
+        for (const token of lineTokens) {
+            const tokenStart = absIndex;
+            const tokenEnd = absIndex + token.content.length;
+            const tokenContent = token.content;
+            const color = token.color || "#d4d4d4"; // Default fallback
+            
+            // Check if this token intersects with any replacement range
+            // We find any range that *contains* or *is contained by* this token.
+            // Ideally tokens match boundaries of AST nodes, but string literals might differ.
+            
+            // Just checks overlap.
+            const intersecting = replacementsWithIds.filter(r => 
+                Math.max(r.start, tokenStart) < Math.min(r.end, tokenEnd)
+            );
 
-    for (const item of replacementsWithIds) {
-         const before = processedCode.substring(0, item.start);
-         const after = processedCode.substring(item.end);
-         // Example: {{c1::variableName}}
-         const replacement = `{{c${item.id}::${item.text}}}`;
-         processedCode = before + replacement + after;
+            if (intersecting.length > 0) {
+                // To be safe, if we have intersection, we wrap the *intersection* part.
+                // But simplifying: assume token is fully inside a range or fully outside?
+                // Or split token?
+                // Splitting is safer.
+                
+                let processedToken = "";
+                let localCursor = tokenStart;
+                
+                // Sort intersections by start time
+                // (Though usually only 1 intersection per token unless token is big string and we replace parts?)
+                // Actually strings in AST (StringLiteral) are usually one token in Shiki (String).
+                // So 1-to-1 is common.
+
+                // Let's iterate characters of the token and check coverage.
+                // Map each char to a replace ID?
+                
+                // Optimization: build a map of index -> clozeId
+                // But ranges are sparse.
+                
+                // Let's use string slicing relative to token.
+                
+                let lastSliceEnd = 0; // relative to token content (0 to length)
+                
+                // Find relevant parts relative to this token
+                const chunksInToken: {startRel: number, endRel: number, id: number}[] = [];
+                
+                for (const r of intersecting) {
+                    const overlapStart = Math.max(r.start, tokenStart);
+                    const overlapEnd = Math.min(r.end, tokenEnd);
+                    
+                    if (overlapEnd > overlapStart) {
+                        chunksInToken.push({
+                            startRel: overlapStart - tokenStart,
+                            endRel: overlapEnd - tokenStart,
+                            id: r.id
+                        });
+                    }
+                }
+                
+                if (chunksInToken.length === 0) {
+                     processedToken = escapeHtml(tokenContent);
+                } else {
+                    for (const chunk of chunksInToken) {
+                         // Add non-clozed part before
+                         if (chunk.startRel > lastSliceEnd) {
+                             processedToken += escapeHtml(tokenContent.substring(lastSliceEnd, chunk.startRel));
+                         }
+                         // Add clozed part
+                         // Format: {{cN::content}}
+                         // We are wrapping the rendered content?
+                         // Anki expects text inside cN.
+                         // Should we put styles INSIDE cN or OUTSIDE?
+                         // If we do <span style=...>{{c1::foo}}</span> -> Anki hides "foo", style remains.
+                         // But if user types answer, they type in style context? Yes.
+                         // Correct.
+                         
+                         const segment = tokenContent.substring(chunk.startRel, chunk.endRel);
+                         processedToken += `{{c${chunk.id}::${escapeHtml(segment)}}}`;
+                         
+                         lastSliceEnd = chunk.endRel;
+                    }
+                    // Tail
+                    if (lastSliceEnd < tokenContent.length) {
+                        processedToken += escapeHtml(tokenContent.substring(lastSliceEnd));
+                    }
+                }
+                
+                lineHtml += `<span style="color: ${color}">${processedToken}</span>`;
+
+            } else {
+                lineHtml += `<span style="color: ${color}">${escapeHtml(tokenContent)}</span>`;
+            }
+            
+            absIndex = tokenEnd;
+        }
+        
+        // Handle newline implicitly or explicitly? 
+        // codeToTokens splits by newline.
+        // We need to add newline character to absIndex if it existed in source.
+        
+        // Check actual code at absIndex?
+        if (code[absIndex] === '\n') {
+            absIndex++;
+             // Add newline to HTML?
+             // Since we use <pre>, literal newline works.
+        } else if (code[absIndex] === '\r' && code[absIndex+1] === '\n') {
+            absIndex += 2;
+        }
+        
+        htmlLines.push(lineHtml);
     }
 
-    // Prepare note
-    // HTML formatting: Use <pre><code> for basic styling.
-    // User wants VSCode Dark theme. For now we use basic grey background.
-    const htmlContent = `
+    const finalHtml = `
     <div style="background-color: #1e1e1e; color: #d4d4d4; padding: 20px; font-family: Consolas, 'Courier New', monospace; font-size: 14px; line-height: 1.5; border-radius: 5px;">
-        <pre style="margin: 0; white-space: pre-wrap;">${escapeHtml(processedCode)}</pre>
+        <pre style="margin: 0; white-space: pre-wrap;">${htmlLines.join('\n')}</pre>
     </div>
     `;
 
-    console.log(`Generated Card for Chunk ${index}: ${replacementsWithIds.length} clozes.`);
-
-    // Add to Anki
-    await addToAnki(htmlContent, modelName);
+    console.log(`Generated HTML with Shiki for Chunk ${index}.`);
+    await addToAnki(finalHtml, modelName);
 }
 
 function escapeHtml(unsafe: string) {
@@ -198,11 +321,6 @@ function escapeHtml(unsafe: string) {
 }
 
 async function addToAnki(content: string, modelName: string) {
-    // Check if deck exists, create if not?
-    // User said "deck is dev".
-    
-    // await invokeAnki("createDeck", { deck: DECK_NAME }); // Already done in main
-    
     const note = {
         deckName: DECK_NAME,
         modelName: modelName,
@@ -223,5 +341,4 @@ async function addToAnki(content: string, modelName: string) {
     }
 }
 
-// Run
 processCode().catch(console.error);
