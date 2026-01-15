@@ -60,7 +60,9 @@ const MODEL_CSS = `
  font-size: 20px;
  text-align: center;
  color: black;
- background-color: white;
+ background-color: #1e1e1e; /* Match code bg */
+ /* Add padding top so content isn't hidden by fixed header */
+ padding-top: 80px; 
 }
 
 .cloze {
@@ -85,9 +87,20 @@ const MODEL_CSS = `
     font-family: Consolas, 'Courier New', monospace;
     font-size: 14px;
     line-height: 1.5;
-    border-radius: 5px;
     text-align: left;
-    overflow-x: auto;
+    /* overflow-x: auto; handled by pre usually, but let's allow it */
+}
+
+.fixed-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background-color: #1e1e1e;
+    z-index: 1000;
+    padding: 10px 20px;
+    border-bottom: 1px solid #333;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
 }
 
 .sticky-header {
@@ -95,20 +108,19 @@ const MODEL_CSS = `
     color: #9cdcfe;
     padding: 5px 10px;
     border-left: 3px solid #0e639c;
-    margin-bottom: 10px;
+    margin-top: 5px;
     font-size: 12px;
     white-space: pre;
     border-radius: 3px;
+    overflow-x: auto;
 }
 
 .meta-header {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     color: #888;
-    font-size: 11px;
-    margin-bottom: 5px;
-    border-bottom: 1px solid #333;
-    padding-bottom: 2px;
+    font-size: 12px;
 }
 
 .context-line {
@@ -122,15 +134,60 @@ pre {
 }
 `;
 
+// Template with Auto-Scroll Script
+const CARD_TEMPLATES = [
+    {
+        Name: "Cloze",
+        Front: `
+<div class="card-content">
+    {{cloze:Text}}
+</div>
+<script>
+    setTimeout(function() {
+        var cloze = document.querySelector('.cloze');
+        if (cloze) {
+            cloze.scrollIntoView({behavior: "smooth", block: "center"});
+        }
+    }, 100);
+</script>
+`,
+        Back: `
+<div class="card-content">
+    {{cloze:Text}}
+</div>
+<script>
+    setTimeout(function() {
+        var cloze = document.querySelector('.cloze');
+        if (cloze) {
+            cloze.scrollIntoView({behavior: "smooth", block: "center"});
+        }
+    }, 100);
+</script>
+`
+    }
+];
+
 async function ensureModel(modelName: string) {
     const models = await invokeAnki("modelNames");
     if (models && models.includes(modelName)) {
-        console.log(`Model '${modelName}' exists. Updating styling...`);
-        // Always force update CSS to ensure latest changes are applied
+        console.log(`Model '${modelName}' exists. Updating styling and templates...`);
+        // Force update CSS
         await invokeAnki("updateModelStyling", {
             model: {
                 name: modelName,
                 css: MODEL_CSS
+            }
+        });
+        // Force update Templates (for JS)
+        await invokeAnki("updateModelTemplates", {
+            model: {
+                name: modelName,
+                templates: {
+                    "Cloze": {
+                        Front: CARD_TEMPLATES[0].Front,
+                        Back: CARD_TEMPLATES[0].Back
+                    }
+                }
             }
         });
         return;
@@ -142,13 +199,7 @@ async function ensureModel(modelName: string) {
         inOrderFields: ["Text"],
         css: MODEL_CSS,
         isCloze: true,
-        cardTemplates: [
-            {
-                Name: "Cloze",
-                Front: "{{cloze:Text}}",
-                Back: "{{cloze:Text}}"
-            }
-        ]
+        cardTemplates: CARD_TEMPLATES
     });
     
     if (result && result.error) {
@@ -417,12 +468,14 @@ export async function generateCards(code: string, title: string, deckName: strin
         // Final HTML
         const finalHtml = `
 <div class="code-container">
-    <div class="meta-header">
-        ${title ? `<strong>${escapeHtml(title)}</strong> &mdash; ` : ''}
-        <span>${deckName}</span>
-        <span style="float: right; opacity: 0.7;">${tags.join(", ")}</span>
+    <div class="fixed-header">
+        <div class="meta-header">
+            ${title ? `<strong>${escapeHtml(title)}</strong> &mdash; ` : ''}
+            <span>${deckName}</span>
+            <span style="float: right; opacity: 0.7;">${tags.join(", ")}</span>
+        </div>
+        ${stickyHeader ? `<div class="sticky-header">${escapeHtml(stickyHeader)}</div>` : ''}
     </div>
-    ${stickyHeader ? `<div class="sticky-header">${escapeHtml(stickyHeader)}</div>` : ''}
     <pre>${htmlLines.join('\n')}</pre>
 </div>
 `;
