@@ -131,7 +131,7 @@ pre {
 }
 `;
 
-// Template with Auto-Scroll Script
+// Template with Auto-Scroll & Dynamic Breadcrumbs Script
 const CARD_TEMPLATES = [
     {
         Name: "Cloze",
@@ -140,12 +140,45 @@ const CARD_TEMPLATES = [
     {{cloze:Text}}
 </div>
 <script>
+    // Auto-scroll to active cloze
     setTimeout(function() {
         var cloze = document.querySelector('.cloze');
         if (cloze) {
             cloze.scrollIntoView({behavior: "smooth", block: "center"});
         }
     }, 100);
+
+    // Dynamic Breadcrumbs
+    (function() {
+        var header = document.querySelector('.sticky-header');
+        var lines = document.querySelectorAll('.code-line');
+        if (!header || lines.length === 0) return;
+
+        var updateBreadcrumb = function() {
+            var offset = 120; // Approximation of header height
+            for (var i = 0; i < lines.length; i++) {
+                var rect = lines[i].getBoundingClientRect();
+                // Find first line that is mainly visible or just entering
+                if (rect.bottom > offset) {
+                    var scope = lines[i].getAttribute('data-scope');
+                    if (scope) {
+                        header.innerText = scope;
+                    } else {
+                        // Empty scope (top level)? Keep previous or clear?
+                        // Usually clear or set to file name? 
+                        // Let's keep it if we are inside a scope that spans empty lines?
+                        // Actually our getStickyHeader returns null for top level.
+                        header.innerText = "";
+                    }
+                    break;
+                }
+            }
+        };
+
+        window.addEventListener('scroll', updateBreadcrumb);
+        // Initial call
+        updateBreadcrumb();
+    })();
 </script>
 `,
         Back: `
@@ -159,6 +192,27 @@ const CARD_TEMPLATES = [
             cloze.scrollIntoView({behavior: "smooth", block: "center"});
         }
     }, 100);
+
+    (function() {
+        var header = document.querySelector('.sticky-header');
+        var lines = document.querySelectorAll('.code-line');
+        if (!header || lines.length === 0) return;
+
+        var updateBreadcrumb = function() {
+            var offset = 120; 
+            for (var i = 0; i < lines.length; i++) {
+                var rect = lines[i].getBoundingClientRect();
+                if (rect.bottom > offset) {
+                    var scope = lines[i].getAttribute('data-scope');
+                    if (scope) header.innerText = scope;
+                    else header.innerText = "";
+                    break;
+                }
+            }
+        };
+        window.addEventListener('scroll', updateBreadcrumb);
+        updateBreadcrumb();
+    })();
 </script>
 `
     }
@@ -236,14 +290,14 @@ function isEffectiveLine(line: string): boolean {
     return true;
 }
 
+// Optimization: Cache scopes?
 function getStickyHeader(sourceFile: SourceFile, line: number): string | null {
     // line is 0-indexed in our logic, but ts-morph uses mostly parsed structure
     // Let's get position
     try {
-        const lines = sourceFile.getFullText().split('\n');
-        // Simple check: if we are out of bounds
-        if (line >= lines.length) return null;
-        
+        // Optimization: Use getPositionOfLineAndCharacter directly without splitting text again (done in outer scope)
+        // But sourceFile holds full text.
+        // We need bound check?
         const pos = sourceFile.compilerNode.getPositionOfLineAndCharacter(line, 0);
         
         let node = sourceFile.getDescendantAtPos(pos);
@@ -269,9 +323,12 @@ function getStickyHeader(sourceFile: SourceFile, line: number): string | null {
         // Let's construct a breadcrumb: Class > Method
         // Reversing to get Top > Down
         const breadcrumbs = scopes.reverse().map(s => {
-             let text = s.getText().split('\n')[0];
-             if (text.length > 60) text = text.substring(0, 57) + "...";
-             return text;
+             // Basic Name
+             let name = "";
+             if (Node.isClassDeclaration(s) || Node.isFunctionDeclaration(s) || Node.isMethodDeclaration(s) || Node.isInterfaceDeclaration(s)) {
+                 name = s.getName() || "Anonymous";
+             }
+             return name;
         });
 
         return breadcrumbs.join(" > ");
@@ -358,6 +415,7 @@ export async function generateCards(code: string, title: string, deckName: strin
             }
         }
     });
+
     
     // 3. Tokenize Full File
     const h = await getHighlighter();
@@ -409,11 +467,9 @@ export async function generateCards(code: string, title: string, deckName: strin
         const chunkStartLine = 0;
         const chunkEndLine = lines.length;
         
-        // Sticky Header (Always top of file?)
-        // If we are just rendering full file, sticky header is less relevant unless we scroll?
-        // But the user liked it. Let's keep it if we were splitting. 
-        // With full file, sticky header at top is just the file-level scope?
-        const stickyHeader = getStickyHeader(sourceFile, chunkStartLine);
+        // Sticky Header IS NOW DYNAMIC. Initial State?
+        // Let's get header for first line.
+        const initialStickyHeader = getStickyHeader(sourceFile, chunkStartLine);
         
         let htmlLines: string[] = [];
         
@@ -422,6 +478,10 @@ export async function generateCards(code: string, title: string, deckName: strin
              // get line start pos
              const lineStartPos = sourceFile.compilerNode.getPositionOfLineAndCharacter(lineIndex, 0);
              let currentPos = lineStartPos;
+             
+             // Dynamic Breadcrumb Scope for this line
+             const lineScope = getStickyHeader(sourceFile, lineIndex);
+             const scopeAttr = lineScope ? `data-scope="${escapeHtml(lineScope)}"` : "";
              
              let lineHtml = "";
              
@@ -487,11 +547,11 @@ export async function generateCards(code: string, title: string, deckName: strin
                  }
                  currentPos = tokenEndPos;
              }
-             return lineHtml;
+             return `<div class="code-line" ${scopeAttr}>${lineHtml}</div>`;
         };
 
         for (let i = chunkStartLine; i < chunkEndLine; i++) {
-            htmlLines.push(`<div class="code-line">${renderLine(i)}</div>`);
+            htmlLines.push(renderLine(i));
         }
 
         // Final HTML - Add Batch info to title? "Title (1/3)"
@@ -505,7 +565,7 @@ export async function generateCards(code: string, title: string, deckName: strin
             <span>${deckName}</span>
             <span style="float: right; opacity: 0.7;">${tags.join(", ")}</span>
         </div>
-        ${stickyHeader ? `<div class="sticky-header">${escapeHtml(stickyHeader)}</div>` : ''}
+        <div class="sticky-header">${initialStickyHeader ? escapeHtml(initialStickyHeader) : ''}</div>
     </div>
     <pre>${htmlLines.join('\n')}</pre>
 </div>
