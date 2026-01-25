@@ -141,12 +141,33 @@ const CARD_TEMPLATES = [
     {{cloze:Text}}
 </div>
 <script>
-    // Auto-scroll to active cloze
-    setTimeout(function() {
+    // Auto-scroll to active cloze (Robust for iPadOS)
+    var scrollRetries = 0;
+    function doScroll() {
         var cloze = document.querySelector('.cloze');
-        if (cloze) {
-            cloze.scrollIntoView({behavior: "smooth", block: "center"});
+        if (!cloze) return false;
+        
+        // 1. Native Scroll (Instant)
+        try {
+            cloze.scrollIntoView({behavior: "auto", block: "center"});
+        } catch(e){}
+
+        // 2. Manual Fallback (Force position)
+        var rect = cloze.getBoundingClientRect();
+        // Check if actually visible/centered? 
+        // Just force scroll to be sure.
+        var absTop = rect.top + window.scrollY;
+        var targetY = absTop - (window.innerHeight / 2) + (rect.height / 2);
+        window.scrollTo(0, targetY);
+        return true;
+    }
+
+    var scrollInterval = setInterval(function() {
+        if (doScroll()) {
+             // Keep retrying a few times to handle layout shifts
         }
+        scrollRetries++;
+        if (scrollRetries > 10) clearInterval(scrollInterval);
     }, 100);
 
     // Dynamic Breadcrumbs
@@ -187,11 +208,21 @@ const CARD_TEMPLATES = [
     {{cloze:Text}}
 </div>
 <script>
-    setTimeout(function() {
+    var scrollRetries = 0;
+    function doScroll() {
         var cloze = document.querySelector('.cloze');
-        if (cloze) {
-            cloze.scrollIntoView({behavior: "smooth", block: "center"});
-        }
+        if (!cloze) return false;
+        try { cloze.scrollIntoView({behavior: "auto", block: "center"}); } catch(e){}
+        var rect = cloze.getBoundingClientRect();
+        var absTop = rect.top + window.scrollY;
+        var targetY = absTop - (window.innerHeight / 2) + (rect.height / 2);
+        window.scrollTo(0, targetY);
+        return true;
+    }
+    var scrollInterval = setInterval(function() {
+        doScroll();
+        scrollRetries++;
+        if (scrollRetries > 10) clearInterval(scrollInterval);
     }, 100);
 
     (function() {
@@ -220,7 +251,7 @@ const CARD_TEMPLATES = [
     }
 ];
 
-async function ensureModel(modelName: string) {
+export async function ensureModel(modelName: string) {
     const models = await invokeAnki("modelNames");
     if (models && models.includes(modelName)) {
         console.log(`Model '${modelName}' exists. Updating styling and templates...`);

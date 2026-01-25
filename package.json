@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "serve": "tsx src/server.ts",
+    "update-template": "tsx src/update-template.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
