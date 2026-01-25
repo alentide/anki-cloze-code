@@ -36,7 +36,8 @@ async function addToAnki(content: string, modelName: string, deckName: string, t
         deckName: deckName,
         modelName: modelName,
         fields: {
-            Text: content
+            Text: content,
+            Extra: ""
         },
         options: {
             allowDuplicate: true
@@ -214,6 +215,7 @@ const CARD_TEMPLATES = [
         updateBreadcrumb();
     })();
 </script>
+<div class="extra-field">{{Extra}}</div>
 `
     }
 ];
@@ -222,6 +224,15 @@ async function ensureModel(modelName: string) {
     const models = await invokeAnki("modelNames");
     if (models && models.includes(modelName)) {
         console.log(`Model '${modelName}' exists. Updating styling and templates...`);
+
+        // Check and Add "Extra" field if missing
+        const fields = await invokeAnki("modelFieldNames", { modelName });
+        if (fields && !fields.includes("Extra")) {
+            console.log("Field 'Extra' missing. Attempting to add via AnkiConnect...");
+            // Use modelFieldAdd to add the field
+            await invokeAnki("modelFieldAdd", { modelName, fieldName: "Extra" });
+        }
+
         // Force update CSS
         await invokeAnki("updateModelStyling", {
             model: {
@@ -247,7 +258,7 @@ async function ensureModel(modelName: string) {
     console.log(`Model '${modelName}' not found. Creating...`);
     const result = await invokeAnki("createModel", {
         modelName: modelName,
-        inOrderFields: ["Text"],
+        inOrderFields: ["Text", "Extra"],
         css: MODEL_CSS,
         isCloze: true,
         cardTemplates: CARD_TEMPLATES
@@ -343,7 +354,7 @@ function smartSplit(code: string): { start: number, end: number }[] {
     return [{ start: 0, end: lines.length }];
 }
 
-export async function generateCards(code: string, title: string, deckName: string, tags: string[]) {
+export async function generateCards(code: string, title: string, deckName: string, tags: string[], options: { split: boolean } = { split: true }) {
     await getHighlighter();
     
     // 1. Parse Full File
@@ -424,8 +435,9 @@ export async function generateCards(code: string, title: string, deckName: strin
         theme: 'dark-plus'
     });
 
-    // 4. Batch Clozes (Chunk by Cloze Count)
-    const MAX_CLOZES_PER_NOTE = 50;
+    // 4. Batch Clozes (Chunk by Cloze Count) or NO SPLIT
+    const MAX_CLOZES_PER_NOTE = options.split ? 50 : 999999;
+    
     // Sort ranges by start position
     rangesToReplace.sort((a, b) => a.start - b.start);
     

@@ -22,7 +22,7 @@ app.post("/generate", async (req, res) => {
     const tagList = Array.isArray(tags) ? tags : (tags || "anki-cloze-code").split(",").map((t: string) => t.trim());
 
     try {
-        const result = await generateCards(code, title || "", deckName, tagList);
+    const result = await generateCards(code, title || "", deckName, tagList, { split: req.body.split !== false });
         res.json(result);
     } catch (error: any) {
         console.error(error);

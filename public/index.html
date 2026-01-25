@@ -103,6 +103,11 @@
                 <label>Tags (comma separated)</label>
                 <input type="text" id="tags" value="anki-cloze-code">
             </div>
+            <div>
+                <label>
+                    <input type="checkbox" id="split" checked style="width: auto;"> Allow Code Splitting
+                </label>
+            </div>
             <button id="generateBtn">Generate Cards</button>
             <div id="status"></div>
         </div>
@@ -114,6 +119,7 @@
             const title = document.getElementById('title').value;
             const deck = document.getElementById('deck').value;
             const tags = document.getElementById('tags').value;
+            const split = document.getElementById('split').checked;
             const statusEl = document.getElementById('status');
 
             if (!code) {
@@ -129,7 +135,7 @@
                 const res = await fetch('/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code, title, deck, tags })
+                    body: JSON.stringify({ code, title, deck, tags, split })
                 });
                 
                 const data = await res.json();
